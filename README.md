@@ -4,88 +4,43 @@
 
 A hands-on SOC and detection engineering investigation into what network telemetry actually reveals when additional data is carried inside an image upload.
 
-This project was built around one question:
+The goal was not simply to make an alert fire.
 
-**If the network can see an image being uploaded, does that mean the detection stack can identify the additional data being carried with it?**
+The goal was to establish a baseline, generate controlled behavior, inspect the telemetry, compare it against ground truth, identify the detection gap, build detection logic, tune it, and validate both positive and negative cases.
 
-The answer from this experiment was no.
-
-Suricata had visibility into both transfers, but the existing alert did not distinguish the modified image carrier from the clean control.
-
-I then built and tested two detection iterations to understand the gap.
-
-> **Main takeaway: Visibility is not the same as detection.**
+> **Key takeaway: Visibility is not the same as detection.**
 
 ---
 
-## Architecture
+## Lab Architecture
 
-![Lab Architecture](architecture/lab-architecture.png)
+![Hidden Data Exfiltration Detection Lab Architecture](architecture/lab-architecture.png)
 
-```text
-Windows Endpoint
-192.168.64.17
-      |
-      | HTTP POST /upload
-      | TCP 8081
-      v
-Suricata 7.0.3
-Interface: enp0s1
-      |
-      | Network telemetry
-      | EVE JSON
-      v
-Ubuntu HTTP Receiver
-192.168.64.12:8081
-```
+The lab used a Windows endpoint to send controlled PNG uploads over cleartext HTTP to an Ubuntu receiver while Suricata inspected the traffic on `enp0s1`.
 
-### Detection Workflow
+Two samples followed the same path:
 
-```text
-Clean Control
-     +
-Modified Carrier
-       |
-       v
-Generate Traffic
-       |
-       v
-Inspect Suricata Telemetry
-       |
-       v
-Compare With Ground Truth
-       |
-       v
-Identify Detection Gap
-       |
-       v
-Detection V1
-       |
-       v
-Negative + Positive Testing
-       |
-       v
-Tune Detection
-       |
-       v
-Detection V2
-       |
-       v
-Validate Results
-```
+- `control.png` — 17,824 byte clean baseline
+- `stego.png` — 17,901 byte modified carrier containing 77 additional bytes
+
+Suricata recorded the network telemetry in `eve.json`.
+
+The investigation then progressed through the existing alert and two custom detection iterations.
 
 ---
 
-# At a Glance
+## At a Glance
 
 | Item | Result |
 |---|---|
+| Windows endpoint | `192.168.64.17` |
+| Ubuntu SOC host | `192.168.64.12` |
+| Protocol | HTTP |
+| Destination port | `8081` |
+| Network sensor | Suricata 7.0.3 |
 | Clean PNG | 17,824 bytes |
 | Modified carrier | 17,901 bytes |
 | Difference | 77 bytes |
-| Transport | HTTP POST |
-| Destination | `192.168.64.12:8081` |
-| Network sensor | Suricata 7.0.3 |
 | Existing alert | SID `2034635` |
 | Detection V1 | SID `1000010` |
 | Detection V2 | SID `1000011` |
@@ -96,83 +51,85 @@ Validate Results
 
 ---
 
-# Scope
+## Scope and Accuracy
 
 This project investigates an **image carrier containing appended test data**.
 
-It does **not** use LSB, pixel manipulation, or another image steganography algorithm.
+It does not use LSB, pixel manipulation, or another image steganography algorithm.
 
-The modified file remained a valid PNG, but the controlled payload was appended after the PNG data.
+The modified file remained a valid PNG, but controlled ASCII data was appended after the PNG data.
 
-Detection V2 also uses a **known test marker**.
+Detection V2 also searches for a known test marker.
 
 Therefore:
 
-**This project does not claim to provide universal steganography detection.**
+> **This project does not claim to provide universal steganography detection.**
 
-The purpose is to demonstrate a repeatable detection engineering process:
+The purpose was to investigate the difference between:
 
 ```text
-Baseline
-→ Generate
-→ Observe
-→ Compare
-→ Detect
-→ Test
-→ Tune
-→ Validate
+Network visibility
+        ↓
+Behavior detection
+        ↓
+Detection specificity
+        ↓
+Validation
+        ↓
+Tuning
 ```
 
 ---
 
 # Investigation Question
 
-The scenario was deliberately simple.
+The scenario was deliberately controlled.
 
-A normal image is uploaded over HTTP.
+First, a normal PNG would be uploaded over HTTP.
 
-Then a modified copy carrying additional controlled data is uploaded through the same path.
+Then a modified copy carrying additional controlled data would be uploaded through the same path.
 
-The network sensor monitors both.
+Suricata would monitor both.
 
-The questions were:
+I wanted to answer four questions:
 
-1. What does Suricata actually see?
-2. Does existing alerting distinguish the two transfers?
-3. Can a behavioral detection identify the upload?
-4. Can the detection be tuned and validated against both a positive and negative sample?
+1. What does Suricata actually observe?
+2. Does the existing alert distinguish the two transfers?
+3. Can I reliably detect the upload behavior?
+4. Can I tune the detection and prove the difference using both positive and negative tests?
 
 ---
 
 # Lab Environment
 
-| Component | Role |
+| Component | Purpose |
 |---|---|
 | Windows endpoint | Traffic source |
 | `192.168.64.17` | Windows lab IP |
 | Ubuntu | Receiver and Suricata host |
 | `192.168.64.12` | Ubuntu lab IP |
 | TCP `8081` | HTTP receiver |
+| `enp0s1` | Suricata monitoring interface |
 | Suricata 7.0.3 | Network monitoring and detection |
+| EVE JSON | Network telemetry |
 | PowerShell | Artifact preparation |
 | curl | Controlled HTTP uploads |
 | jq | EVE JSON investigation |
+| Python HTTP server | Upload receiver |
 
 All activity was performed inside systems and network infrastructure under my control.
 
 ---
 
-# Phase 1 — Establish the Baseline
+# Phase 1: Establish the Baseline
 
-Before modifying anything, I established normal behavior.
-
-The clean sample was:
+I started with a clean PNG:
 
 ```text
 control.png
 ```
 
-Size:
+File size:
 
 ```text
 17,824 bytes
@@ -184,7 +141,7 @@ SHA256:
 5BC7002B5E287EC1091B040DA49434F9EB60734584BC6FAC495CFD77FCA910D7
 ```
 
-The file was uploaded from Windows:
+The image was uploaded from Windows:
 
 ```powershell
 curl.exe -X POST --data-binary "@C:\StegoLab\control.png" -H "Content-Type: image/png" http://192.168.64.12:8081/upload
@@ -196,29 +153,49 @@ The receiver returned:
 OK
 ```
 
-The SHA256 of the received object matched the source.
+The received object produced the same SHA256:
 
-This established:
+```text
+5bc7002b5e287ec1091b040da49434f9eb60734584bc6fac495cfd77fca910d7
+```
 
-- a known clean sample
-- a known transfer path
-- a known file size
-- a known hash
-- baseline network telemetry
+This established the baseline:
 
-![Baseline Transfer](evidence/01-baseline-control-transfer.png)
+```text
+Known file
+        ↓
+Known size
+        ↓
+Known hash
+        ↓
+Known network path
+        ↓
+Successful transfer
+```
+
+The source and destination hashes matched.
+
+### Evidence
+
+![Baseline Control Transfer](evidence/01-baseline-control-transfer.png)
 
 ---
 
-# Phase 2 — Create the Experimental Carrier
+# Phase 2: Create the Experimental Carrier
 
-I created a controlled marker:
+I created a controlled test marker:
 
 ```text
 STEGOLAB_TEST_MARKER_2026
 ```
 
-The marker was added to a copy of the PNG as appended ASCII data.
+The marker was stored in:
+
+```text
+C:\StegoLab\secret.txt
+```
+
+I then created a copy of the clean PNG and appended controlled ASCII data.
 
 The resulting artifact was:
 
@@ -226,7 +203,7 @@ The resulting artifact was:
 stego.png
 ```
 
-Size:
+File size:
 
 ```text
 17,901 bytes
@@ -238,25 +215,27 @@ SHA256:
 BEC85B9965F2B109793D7540933E2AA24CEA8F7721360A260213BD535EF4F50F
 ```
 
-The size difference was:
+The difference between the samples was:
 
 ```text
 17,901 - 17,824 = 77 bytes
 ```
 
-The modified carrier still rendered as an image.
+The modified carrier continued to render normally as a PNG.
 
-### Ground Truth
+### Important Technical Distinction
 
-The known marker gave me something deterministic to validate later.
+The payload was appended after the PNG data.
 
-Instead of assuming the additional data survived the transfer, I could prove it.
+It was **not hidden inside image pixels**.
+
+This distinction is important because the experiment should not be represented as LSB or general steganography detection.
 
 ---
 
-# Phase 3 — Transfer the Modified Carrier
+# Phase 3: Transfer the Modified Carrier
 
-The modified image followed the same path:
+The modified carrier followed exactly the same network path:
 
 ```powershell
 curl.exe -X POST --data-binary "@C:\StegoLab\stego.png" -H "Content-Type: image/png" http://192.168.64.12:8081/upload
@@ -268,13 +247,21 @@ Response:
 OK
 ```
 
-The receiver recorded:
+Ubuntu received:
 
 ```text
 17,901 bytes
 ```
 
-The received SHA256 matched the Windows source.
+Received SHA256:
+
+```text
+bec85b9965f2b109793d7540933e2aa24cea8f7721360a260213bd535ef4f50f
+```
+
+The source and destination hashes matched.
+
+### Ground Truth Validation
 
 I then searched the received object for the controlled marker:
 
@@ -288,57 +275,59 @@ Result:
 STEGOLAB_TEST_MARKER_2026
 ```
 
-This closed the ground-truth loop.
+This closed the ground truth loop:
 
 ```text
 Marker created
-      ↓
+        ↓
 Added to carrier
-      ↓
-HTTP transfer
-      ↓
-Received object
-      ↓
-SHA256 matched
-      ↓
+        ↓
+Carrier uploaded
+        ↓
+Destination hash matched
+        ↓
 Marker recovered
 ```
 
-The additional test data had crossed the monitored network intact.
+The additional test data crossed the monitored connection and arrived intact.
+
+### Evidence
 
 ![Modified Carrier Transfer](evidence/02-modified-carrier-transfer.png)
 
 ---
 
-# Phase 4 — Inspect the Network Telemetry
+# Phase 4: What Did Suricata See?
 
-Suricata recorded both transactions as HTTP.
+Suricata parsed both transactions as HTTP.
 
-## Control
+## Clean Control
 
 ```text
-Source:       192.168.64.17
-Destination:  192.168.64.12:8081
-Method:       POST
-URI:          /upload
-User Agent:   curl/8.21.0
-File Size:    17,824 bytes
-HTTP Status:  200
+Source:          192.168.64.17
+Destination:     192.168.64.12:8081
+HTTP Method:     POST
+URI:             /upload
+User Agent:      curl/8.21.0
+HTTP Status:     200
+File Size:       17,824 bytes
+Bytes To Server: 18,891
 ```
 
 ## Modified Carrier
 
 ```text
-Source:       192.168.64.17
-Destination:  192.168.64.12:8081
-Method:       POST
-URI:          /upload
-User Agent:   curl/8.21.0
-File Size:    17,901 bytes
-HTTP Status:  200
+Source:          192.168.64.17
+Destination:     192.168.64.12:8081
+HTTP Method:     POST
+URI:             /upload
+User Agent:      curl/8.21.0
+HTTP Status:     200
+File Size:       17,901 bytes
+Bytes To Server: 18,968
 ```
 
-The file size differed by exactly:
+The object sizes differed by:
 
 ```text
 77 bytes
@@ -347,29 +336,28 @@ The file size differed by exactly:
 The flow bytes to the server also differed by:
 
 ```text
-77 bytes
+18,968 - 18,891 = 77 bytes
 ```
 
-This was useful evidence.
+Suricata therefore had visibility into the additional transferred bytes.
 
-Suricata could see the difference in the transferred data.
-
-But seeing a difference did not mean the existing detection understood its significance.
+But that did not mean the existing detection understood what those bytes represented.
 
 ---
 
-# Phase 5 — Existing Detection
+# Phase 5: Existing Detection
 
-Both transactions triggered the same existing Suricata signature:
+Both transfers generated the same existing Suricata alert:
 
 ```text
 SID: 2034635
-ET INFO Python BaseHTTP ServerBanner
+Signature: ET INFO Python BaseHTTP ServerBanner
+Category: Misc activity
+Severity: 3
+Direction: to_client
 ```
 
-The alert was associated with the Python HTTP service.
-
-It appeared for both samples.
+The result was:
 
 ```text
 Clean control
@@ -382,13 +370,17 @@ Modified carrier
 SID 2034635
 ```
 
-The alert provided information about the server.
+The alert identified an aspect of the Python HTTP service.
 
-It did **not** distinguish the modified carrier from the clean image.
+It did not distinguish the modified carrier from the clean control.
+
+It also did not identify the controlled marker.
 
 That became the detection gap.
 
-> The sensor had visibility into the transaction, but the existing alert did not identify the experimental condition I was investigating.
+> **The traffic was visible. The condition I cared about was not distinguished by the existing alert.**
+
+### Evidence
 
 ![Existing Detection Comparison](evidence/03-existing-detection-comparison.png)
 
@@ -396,19 +388,21 @@ That became the detection gap.
 
 # Detection Hypothesis
 
-My first detection hypothesis was intentionally broad:
+My first custom detection intentionally targeted the transfer behavior.
+
+Hypothesis:
 
 > An HTTP POST from the Windows endpoint to the lab upload service should be detectable as upload behavior.
 
-This was not intended to detect hidden data.
+The purpose was not yet to identify the additional data.
 
-It was designed to establish whether I could reliably detect the behavior carrying it.
+I first wanted to prove that the behavior carrying it could be detected reliably.
 
 ---
 
-# Phase 6 — Detection V1
+# Phase 6: Detection V1
 
-Detection V1 focused on the HTTP POST.
+Detection V1:
 
 ```text
 SID: 1000010
@@ -424,69 +418,67 @@ alert http 192.168.64.17 any -> 192.168.64.12 8081 (msg:"LAB Possible Data Uploa
 Expected:
 
 ```text
-Clean control     → ALERT
-Modified carrier  → ALERT
+Control   → ALERT
+Modified  → ALERT
 ```
 
 Actual:
 
 ```text
-Clean control     → ALERT
-Modified carrier  → ALERT
+Control   → ALERT
+Modified  → ALERT
 ```
 
-Detection V1 worked exactly as designed.
+Detection V1 successfully detected the HTTP upload behavior.
 
-But it exposed another problem.
+But it could not distinguish the modified carrier from the clean baseline.
 
-It detected the **transfer behavior**, not the difference between the two samples.
+### Evidence
 
-![Detection V1](evidence/04-detection-v1-validation.png)
+![Detection V1 Validation](evidence/04-detection-v1-validation.png)
 
 ---
 
-# Detection V1 Troubleshooting
+# Troubleshooting Detection V1
 
 Detection V1 did not work immediately.
 
-That became an investigation of its own.
-
-The rule passed:
+The rule passed configuration validation:
 
 ```bash
 sudo suricata -T -c /etc/suricata/suricata.yaml
 ```
 
-Suricata reported:
+Suricata reported that the configuration loaded successfully.
+
+But SID `1000010` did not fire.
+
+I checked the investigation layers separately:
 
 ```text
-Configuration provided was successfully loaded.
+Traffic reaching sensor       YES
+HTTP parsed                    YES
+Method = POST                  YES
+Source IP correct              YES
+Destination IP correct         YES
+Destination port correct       YES
+Rule syntax valid              YES
+Alert generated                NO
 ```
 
-But SID `1000010` remained silent.
-
-Instead of immediately rewriting the rule, I verified each layer.
+The running ruleset showed:
 
 ```text
-Traffic captured       → YES
-HTTP parsed            → YES
-Method POST            → YES
-Correct source         → YES
-Correct destination    → YES
-Correct port           → YES
-Rule syntax valid      → YES
-Alert generated        → NO
+rules_loaded: 51904
+rules_failed: 0
+rules_skipped: 0
 ```
 
-I queried the running ruleset:
+I then queried Suricata's active default rule path:
 
-```text
-Rules loaded:   51,904
-Rules failed:   0
-Rules skipped:  0
+```bash
+sudo suricatasc -c "conf-get default-rule-path"
 ```
-
-Then I checked Suricata's active default rule path.
 
 Result:
 
@@ -494,49 +486,57 @@ Result:
 /var/lib/suricata/rules
 ```
 
-I had originally written the rule to:
+I had originally placed the rule in:
 
 ```text
 /etc/suricata/rules/local.rules
 ```
 
-But the active `local.rules` was being resolved from:
+But Suricata was resolving `local.rules` from:
 
 ```text
 /var/lib/suricata/rules/local.rules
 ```
 
-### Root Cause
+## Root Cause
 
-The rule was syntactically valid.
+The rule was valid.
 
 It was simply in the wrong rule file.
 
-After adding SID `1000010` to the active rule path and reloading the rules:
+I moved the custom detection into the active rule path and reloaded the rules:
 
 ```bash
 sudo suricatasc -c reload-rules
 ```
 
-Suricata returned:
+Result:
 
 ```text
 {"message": "done", "return": "OK"}
 ```
 
-The detection then fired successfully.
+Detection V1 then fired successfully.
 
 ### Troubleshooting Lesson
 
-> **A valid detection rule is not necessarily an active detection rule.**
+> **Valid syntax does not guarantee an active detection.**
 
-Telemetry availability, rule syntax, rule loading, and rule logic are separate things to validate.
+During detection troubleshooting, I need to separate:
+
+```text
+Telemetry
+Rule syntax
+Rule loading
+Rule logic
+Alert generation
+```
 
 ---
 
-# Additional Troubleshooting — Receiver Failure
+# Troubleshooting the HTTP Receiver
 
-During another test, Windows returned:
+During another control test, Windows returned:
 
 ```text
 curl: (7) Failed to connect to 192.168.64.12:8081
@@ -550,7 +550,7 @@ sudo ss -lntp | grep ':8081'
 
 Nothing was listening.
 
-The HTTP receiver had stopped.
+The Python receiver had stopped.
 
 I restarted it:
 
@@ -558,70 +558,77 @@ I restarted it:
 cd ~/stego-exfil-lab && python3 receiver.py
 ```
 
-Uploads resumed successfully.
+The receiver began accepting uploads again.
 
-This was not a detection problem.
+This was a service availability problem.
 
-It was a service availability problem.
+It was not a Suricata detection problem.
 
-That distinction mattered during troubleshooting.
+That distinction prevented unnecessary changes to the detection logic.
 
 ---
 
-# Additional Troubleshooting — EVE JSON
+# Troubleshooting EVE JSON
 
-During telemetry analysis, an older malformed JSON record caused `jq` parsing errors against `eve.json`.
+During telemetry analysis, at least one malformed historical JSON record caused direct `jq` parsing errors against `eve.json`.
 
-Rather than treating the entire log as unusable, I processed the records individually and ignored malformed lines.
+Instead of treating the entire log as unusable, I processed the records individually and ignored malformed lines.
 
-Example pattern:
+Example:
 
 ```bash
 sudo tail -n 3000 /var/log/suricata/eve.json | while IFS= read -r line; do printf '%s\n' "$line" | jq -c 'FILTER' 2>/dev/null; done
 ```
 
-This allowed valid events to remain usable for the investigation.
+This allowed the valid Suricata records to remain usable for the investigation.
 
 ---
 
-# Phase 7 — Detection Tuning
+# Phase 7: Detection Tuning
 
-Detection V1 answered one question:
+Detection V1 answered:
 
-**Can I detect the upload behavior?**
+> Can I detect the upload behavior?
 
 Yes.
 
 But it could not answer:
 
-**Can I distinguish my controlled modified sample from the clean control?**
+> Can I distinguish the controlled modified sample from the clean control?
+
+The V1 result was:
 
 ```text
-V1
+CONTROL
+   ↓
+ALERT
 
-Control   → ALERT
-Modified  → ALERT
+MODIFIED
+   ↓
+ALERT
 ```
 
 That became the tuning problem.
 
-Before creating V2, I verified Suricata's HTTP request-body inspection configuration.
+Before building Detection V2, I verified Suricata's HTTP request body inspection limit.
+
+Configuration:
 
 ```text
 request-body-limit: 100kb
 ```
 
-The test artifacts were approximately 18 KB.
+Both samples were approximately 18 KB.
 
-That meant the request body was within the configured inspection limit for this experiment.
+They were therefore within the configured request body inspection limit for this experiment.
 
 ---
 
-# Phase 8 — Detection V2
+# Phase 8: Detection V2
 
-Detection V2 was deliberately designed as a **lab validation rule**.
+Detection V2 was deliberately built as a **lab validation rule**.
 
-It searched the HTTP request body for the controlled marker.
+Instead of detecting every POST, it inspected the HTTP request body for the controlled marker.
 
 ```text
 SID: 1000011
@@ -634,13 +641,19 @@ Rule:
 alert http 192.168.64.17 any -> 192.168.64.12 8081 (msg:"LAB Hidden Marker in HTTP Upload"; flow:established,to_server; http.request_body; content:"STEGOLAB_TEST_MARKER_2026"; sid:1000011; rev:1;)
 ```
 
-The objective was not to claim arbitrary hidden-data detection.
+The objective was specific:
 
-The objective was to validate whether Suricata could inspect the request body and distinguish the controlled positive sample from the negative control.
+```text
+Clean sample
+should remain silent
+
+Modified sample
+should alert
+```
 
 ---
 
-# Phase 9 — Negative Validation
+# Phase 9: Negative Validation
 
 I uploaded `control.png` again.
 
@@ -656,13 +669,11 @@ Actual:
 SID 1000011 → NO ALERT
 ```
 
-This silence was intentional.
+This was intentional silence.
 
-The marker did not exist in the clean sample.
+The controlled marker did not exist in the clean sample.
 
-That made the clean image the negative control for Detection V2.
-
-![Detection V2 Negative Test](evidence/05-detection-v2-negative-test.png)
+The negative test therefore behaved as expected.
 
 ### Intentional Silence Record
 
@@ -683,25 +694,37 @@ Owner:
 Lab analyst
 
 Review condition:
-Review if Detection V2 is changed beyond the controlled marker test
+Review if Detection V2 logic is changed or expanded
 ```
+
+### Evidence
+
+![Detection V2 Negative Test](evidence/05-detection-v2-negative-test.png)
 
 ---
 
-# Phase 10 — Positive Validation
+# Phase 10: Positive Validation
 
 I then uploaded `stego.png`.
 
 Suricata generated:
 
 ```text
-SID:        1000011
-Signature:  LAB Hidden Marker in HTTP Upload
-Source:     192.168.64.17
-Destination:192.168.64.12:8081
-Direction:  to_server
-Method:     POST
-File Size:  17,901 bytes
+SID:          1000011
+Signature:    LAB Hidden Marker in HTTP Upload
+Source:       192.168.64.17
+Destination:  192.168.64.12
+Port:         8081
+Direction:    to_server
+HTTP Method:  POST
+URI:          /upload
+File Size:    17,901 bytes
+```
+
+Flow ID:
+
+```text
+2203588266728211
 ```
 
 Result:
@@ -712,18 +735,20 @@ Modified carrier → ALERT
 
 The positive sample behaved as expected.
 
+### Evidence
+
 ![Detection V2 Positive Test](evidence/06-detection-v2-positive-test.png)
 
 ---
 
-# Final Results
+# Final Detection Matrix
 
 | Sample | Size | Existing SID 2034635 | V1 SID 1000010 | V2 SID 1000011 |
 |---|---:|---|---|---|
 | Clean control | 17,824 B | ALERT | ALERT | NO ALERT |
 | Modified carrier | 17,901 B | ALERT | ALERT | ALERT |
 
-The investigation moved through three detection states:
+The investigation moved through three stages:
 
 ```text
 EXISTING DETECTION
@@ -731,7 +756,8 @@ EXISTING DETECTION
 Control  → ALERT
 Modified → ALERT
 
-Could not distinguish samples.
+Result:
+Did not distinguish the samples.
 
 
 DETECTION V1
@@ -739,8 +765,9 @@ DETECTION V1
 Control  → ALERT
 Modified → ALERT
 
+Result:
 Successfully detected upload behavior.
-Still could not distinguish samples.
+Still too broad for sample distinction.
 
 
 DETECTION V2
@@ -748,64 +775,89 @@ DETECTION V2
 Control  → NO ALERT
 Modified → ALERT
 
-Successfully distinguished the controlled marker test.
+Result:
+Successfully distinguished the controlled
+known marker test.
 ```
 
 ---
 
 # Detection Tuning Summary
 
-The most important tuning change was:
+The main tuning change was:
 
 ```text
-V1
-Detect the HTTP POST behavior
+Detection V1
         ↓
-Too broad for sample distinction
+Detect HTTP POST
         ↓
-V2
-Inspect the request body for the controlled marker
+Control alerts
+Modified alerts
+        ↓
+Too broad
+        ↓
+Detection V2
+        ↓
+Inspect HTTP request body
+for controlled marker
+        ↓
+Control stays silent
+Modified alerts
 ```
 
-The purpose of V2 was validation.
+Detection V2 proved that Suricata could inspect the relevant HTTP request body and match the known marker.
 
-It demonstrated that Suricata could inspect the relevant HTTP body and match a known indicator.
+It does **not** prove arbitrary hidden data or arbitrary steganography can be detected with this rule.
 
-It should **not** be interpreted as a production-ready hidden-data detector.
+---
+
+# What the Experiment Proved
+
+The evidence supports these conclusions:
+
+**1. Both transfers were visible to Suricata.**
+
+**2. The modified carrier contained 77 additional bytes.**
+
+**3. Those 77 additional bytes crossed the monitored network.**
+
+**4. The known marker survived the transfer.**
+
+**5. The existing SID `2034635` fired on both samples and did not distinguish them.**
+
+**6. Detection V1 reliably detected the HTTP POST behavior but fired on both samples.**
+
+**7. Detection V2 remained silent for the clean control.**
+
+**8. Detection V2 alerted on the modified carrier containing the known marker.**
+
+Anything beyond those conclusions would require additional testing.
 
 ---
 
 # Lessons Learned
 
-## 1. Visibility does not equal detection
+## Visibility Does Not Equal Detection
 
-Suricata recorded both transfers.
+Suricata could see both transactions.
 
-That did not mean the existing detection could explain what made the modified transfer different.
+That did not mean the existing detection understood what made the second transaction different.
 
-## 2. An alert firing does not prove useful detection
+## An Alert Firing Is Not Enough
 
-Detection V1 worked.
+Detection V1 worked technically.
 
-But it fired on both the positive and negative samples.
+But because both the clean and modified samples triggered it, the rule did not answer the more specific detection question.
 
-The alert alone was not enough.
+## Controls Strengthen Detection Testing
 
-## 3. Controls make conclusions stronger
+Without the clean control, I could have seen Detection V1 fire on the modified sample and incorrectly concluded that I had built a useful detector.
 
-Without `control.png`, I could have seen SID `1000010` fire on the modified carrier and incorrectly assumed I had built a meaningful detector.
+The negative control exposed that the detection was broader than the behavior I wanted to distinguish.
 
-The control exposed that the rule was detecting something broader.
+## Ground Truth Comes First
 
-## 4. Negative tests deserve documentation
-
-The absence of SID `1000011` for the clean control was expected behavior.
-
-Intentional silence can be part of successful validation.
-
-## 5. Ground truth comes before detection claims
-
-I verified:
+Before evaluating detection performance, I verified:
 
 ```text
 Source artifact
@@ -814,53 +866,51 @@ File size
 SHA256
 Marker recovery
 Network telemetry
-Positive detection
-Negative detection
 ```
 
-That allowed the conclusions to stay tied to evidence.
+That gave the experiment known ground truth.
 
-## 6. Troubleshooting should isolate layers
+## Intentional Silence Matters
 
-During this project I encountered:
+The absence of SID `1000011` during the clean control test was expected.
+
+That silence was part of successful validation.
+
+## Troubleshooting Needs Layers
+
+This project produced several unrelated failures:
 
 ```text
-Artifact creation problem
-Rule path problem
-Receiver availability problem
-JSON parsing problem
-Detection tuning problem
+Artifact creation
+Receiver availability
+Rule location
+JSON parsing
+Detection specificity
 ```
 
-They required different fixes.
-
-Treating every failure as a detection failure would have sent the investigation in the wrong direction.
+Treating every problem as a rule problem would have produced unnecessary changes.
 
 ---
 
 # What I'd Improve
 
-This proof of concept deliberately uses a known marker.
+This experiment answered the controlled question, but it also created several clear next steps.
 
-A stronger next iteration would remove that dependency.
+## True Image Steganography
 
-I would explore:
+The next iteration should use controlled LSB or another genuine image steganography technique instead of appended data.
 
-### 1. True Image Steganography
+That would test a substantially different hiding mechanism.
 
-Use controlled LSB or another image steganography technique rather than appended data.
+## HTTPS
 
-That would create a more realistic image-based hiding scenario.
+This experiment used cleartext HTTP.
 
-### 2. HTTPS
+Repeating it over HTTPS would demonstrate how encrypted transport changes network sensor visibility.
 
-Repeat the experiment over encrypted traffic.
+## Endpoint Telemetry
 
-This would test what network telemetry remains available when payload inspection is no longer directly possible.
-
-### 3. Endpoint Telemetry
-
-Add endpoint evidence around:
+I would add endpoint evidence around:
 
 ```text
 File creation
@@ -870,49 +920,49 @@ Network connection
 Upload process
 ```
 
-Then correlate endpoint and network observations.
+This would allow endpoint and network telemetry to be correlated.
 
-### 4. Behavioral Detection
+## Behavioral Detection
 
-Instead of searching for a known marker, investigate combinations such as:
+A production-oriented investigation should move beyond a known marker.
+
+Potential contextual signals could include:
 
 ```text
 Unusual destination
-+
 Unexpected upload process
-+
 Rare destination port
-+
-Upload volume
-+
+Transfer volume
 Host baseline deviation
+Destination reputation
+File characteristics
 ```
 
-### 5. Multiple Controls
+These signals would need testing and tuning against legitimate traffic.
 
-Use several legitimate PNG files with different sizes.
+## More Negative Controls
 
-This would make it easier to demonstrate why file-size-only detection would overfit the original samples.
+I would use multiple legitimate PNG files with different sizes.
 
-### 6. Additional Positive Samples
+That would make it easier to demonstrate why simple file size thresholds would overfit this experiment.
 
-Test different payload contents and carrier sizes.
+## More Positive Samples
 
-A detection should be validated against variation rather than one artifact.
+I would test different payload contents and carrier sizes.
+
+A detection should survive variation rather than succeeding against only one artifact.
 
 ---
 
 # Limitations
 
-This project has several deliberate limitations.
+## Not Pixel Based Steganography
 
-### Not True Pixel Steganography
-
-The controlled data was appended to the PNG.
+The controlled data was appended after the PNG data.
 
 It was not hidden inside pixel values.
 
-### Known Marker Dependency
+## Known Marker Dependency
 
 Detection V2 searches for:
 
@@ -920,65 +970,67 @@ Detection V2 searches for:
 STEGOLAB_TEST_MARKER_2026
 ```
 
-Unknown content would not necessarily trigger this rule.
+Unknown content would not necessarily trigger it.
 
-### HTTP
+## Cleartext HTTP
 
-The experiment used unencrypted HTTP.
+The experiment used HTTP.
 
-HTTPS would materially change network-content visibility without decryption.
+Encrypted HTTPS traffic would materially change what Suricata could inspect without additional decryption capabilities.
 
-### File Size Is Not a Detector
+## File Size Is Not a Reliable Detection
 
-The 77-byte difference was useful experimental evidence.
+The 77 byte difference was useful experimental evidence.
 
-It should not become:
+It should not become a production rule such as:
 
 ```text
 PNG larger than 17,824 bytes = suspicious
 ```
 
-Normal images vary widely in size.
+Legitimate images naturally vary in size.
 
-### HTTP POST Is Broad
+## HTTP POST Is Broad
 
-Detection V1 intentionally demonstrated this.
+POST requests are common legitimate behavior.
 
-POST is common legitimate behavior.
-
-A production detection would require additional context and tuning.
+Detection V1 was deliberately broad to demonstrate that detecting a transport behavior is different from detecting the condition being investigated.
 
 ---
 
 # Skills Demonstrated
 
-This project exercised:
+This project exercised practical skills in:
 
-- SOC investigation methodology
-- baseline establishment
-- control testing
-- hypothesis-driven investigation
-- network telemetry analysis
-- Suricata EVE JSON analysis
-- custom Suricata detection development
-- positive testing
-- negative testing
-- detection tuning
-- rule validation
-- detection troubleshooting
-- service troubleshooting
-- ground-truth validation
-- SHA256 verification
-- HTTP analysis
-- documentation of intentional silence
-- evidence-based reporting
-- detection limitation analysis
+```text
+SOC investigation
+Detection engineering
+Baseline establishment
+Control testing
+Hypothesis development
+Network telemetry analysis
+Suricata
+EVE JSON analysis
+HTTP analysis
+Custom IDS rule development
+Positive testing
+Negative testing
+Detection tuning
+Rule validation
+Detection troubleshooting
+Service troubleshooting
+Ground truth validation
+SHA256 verification
+Intentional silence documentation
+Evidence based reporting
+Detection limitation analysis
+```
 
 ---
 
 # Detection Rules
 
-The custom rules are stored in:
+The custom Suricata rules are stored in:
 
 ```text
 rules/
@@ -986,13 +1038,13 @@ rules/
 └── detection-v2.rules
 ```
 
-### Detection V1
+## Detection V1
 
 ```text
 alert http 192.168.64.17 any -> 192.168.64.12 8081 (msg:"LAB Possible Data Upload via HTTP POST"; flow:established,to_server; http.method; content:"POST"; sid:1000010; rev:1;)
 ```
 
-### Detection V2
+## Detection V2
 
 ```text
 alert http 192.168.64.17 any -> 192.168.64.12 8081 (msg:"LAB Hidden Marker in HTTP Upload"; flow:established,to_server; http.request_body; content:"STEGOLAB_TEST_MARKER_2026"; sid:1000011; rev:1;)
@@ -1001,6 +1053,8 @@ alert http 192.168.64.17 any -> 192.168.64.12 8081 (msg:"LAB Hidden Marker in HT
 ---
 
 # Evidence
+
+The repository contains genuine screenshots captured during the experiment.
 
 ```text
 evidence/
@@ -1012,23 +1066,9 @@ evidence/
 └── 06-detection-v2-positive-test.png
 ```
 
-Every screenshot in this repository comes from the actual lab.
+The screenshots are evidence.
 
-Generated terminal output is not used as evidence.
-
----
-
-# How I Would Explain This in an Interview
-
-> I wanted to understand the difference between network visibility and useful detection, so I built a controlled image-carrier exfiltration experiment.
->
-> I established a clean PNG as my baseline, created a modified copy containing a known test marker, transferred both over the same HTTP path, and monitored them with Suricata.
->
-> The existing alert fired on both transfers but only identified the Python HTTP server. My first custom detection identified the POST behavior, but the control showed that it was too broad because both samples triggered it.
->
-> I then created a second lab validation rule using the known marker. The clean control remained silent and the modified sample alerted.
->
-> The important lesson was not that I had created a universal steganography detector, because I hadn't. It was learning how to move from a question to ground truth, telemetry, detection, negative testing, tuning, and evidence-backed conclusions.
+The architecture diagram is explanatory and is **not** treated as experimental evidence.
 
 ---
 
@@ -1060,26 +1100,70 @@ hidden-data-exfiltration-detection-lab/
 
 ---
 
-# Disclaimer
+# How I Would Explain This in an Interview
 
-This project was conducted in an isolated home lab using systems and network traffic under my control.
-
-The project is intended for defensive security research, SOC training, and detection engineering practice.
+> I wanted to understand the difference between network visibility and useful detection, so I built a controlled image carrier exfiltration experiment.
+>
+> I established a clean PNG as my baseline and created a modified copy containing a known test marker. I transferred both through the same HTTP path while monitoring the traffic with Suricata.
+>
+> The existing Suricata alert fired on both transfers but identified the Python HTTP server rather than distinguishing the modified carrier.
+>
+> My first custom detection identified the HTTP POST behavior. It worked, but testing it against the control showed that it was too broad because both samples triggered it.
+>
+> I then built a second lab validation rule around the known marker. The clean control remained silent while the modified carrier generated the expected alert.
+>
+> The main lesson was not that I had built a universal steganography detector, because I had not. The value was working through the full process from hypothesis and baseline to ground truth, telemetry analysis, detection development, negative testing, tuning, and evidence backed conclusions.
 
 ---
 
-## Final Takeaway
+# Final Takeaway
 
 ```text
-Seeing the traffic
-        ≠
-Understanding the behavior
-        ≠
+Seeing traffic
+      ≠
+Understanding behavior
+      ≠
 Detecting the condition
-        ≠
+      ≠
 Having a useful detection
 ```
 
-For me, the value of this project was learning to prove each of those stages separately.
+This lab reinforced the workflow I want to continue using for detection engineering:
+
+```text
+Question
+   ↓
+Hypothesis
+   ↓
+Baseline
+   ↓
+Generate Behavior
+   ↓
+Collect Telemetry
+   ↓
+Establish Ground Truth
+   ↓
+Identify Detection Gap
+   ↓
+Build Detection
+   ↓
+Test
+   ↓
+Tune
+   ↓
+Negative Validation
+   ↓
+Positive Validation
+   ↓
+Document Limitations
+```
 
 **Baseline it. Generate it. Observe it. Detect it. Test what should stay silent. Tune from evidence.**
+
+---
+
+## Disclaimer
+
+This project was conducted in an isolated home lab using systems and network traffic under my control.
+
+It is intended for defensive security research, SOC training, and detection engineering practice.
