@@ -14,7 +14,7 @@ The goal was to establish a baseline, generate controlled behavior, inspect the 
 
 ## Lab Architecture
 
-![Hidden Data Exfiltration Detection Lab Architecture](architecture/lab-architecture.png)
+![Hidden Data Exfiltration Detection Lab Architecture](evidence/lab-architecture.png)
 
 The lab used a Windows endpoint to send controlled PNG uploads over cleartext HTTP to an Ubuntu receiver while Suricata inspected the traffic on `enp0s1`.
 
