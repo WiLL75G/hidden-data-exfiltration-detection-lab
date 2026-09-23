@@ -20,8 +20,8 @@ The lab used a Windows endpoint to send controlled PNG uploads over cleartext HT
 
 Two samples followed the same path:
 
-- `control.png` — 17,824 byte clean baseline
-- `stego.png` — 17,901 byte modified carrier containing 77 additional bytes
+- `control.png` 17,824 byte clean baseline
+- `stego.png` 17,901 byte modified carrier containing 77 additional bytes
 
 Suricata recorded the network telemetry in `eve.json`.
 
